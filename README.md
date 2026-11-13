@@ -21,7 +21,7 @@ The controller provides:
 
 The Monroe Controller follows the treatment sequence illustrated below.
 
-![Monroe Controller Treatment Process Flowchart](images/ProgramFlowChart.png)
+![Monroe Controller Treatment Process Flowchart](Images/ProgramFlowChart.png)
 
 The flowchart defines the treatment stages, decision conditions, actuator operations, and configurable parameters. Each cycle progresses through **Start Treatment → Chamber Evacuation → Plasma Engaged → Chamber Re-pressurised → Plasma Disengaged**, then repeats until the configured number of cycles is complete.
 
