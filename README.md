@@ -179,6 +179,20 @@ A live pressure chart displays chamber pressure alongside **target** and **ambie
 
 The GUI displays feedback reported by the Arduino, including pump state, solenoid state, half-bridge state, gate frequency, and proportional valve opening. These values update as status messages are received.
 
+### 7.4 Inlet Sensors Tab
+
+The **Inlet sensors** tab monitors the additional sensors on the Arduino I2C bus. Each reading has its own card with a live value and a rolling trend chart covering the last 180 s:
+
+| Reading | Source | Unit |
+|---|---|---|
+| Flow rate | SFM4300-50-P | slm |
+| Humidity | CHT832X | %RH |
+| Temperature | CHT832X | °C |
+
+Each card has a checkbox in its title that switches that reading on or off. A switched-off reading shows **Off** and is no longer plotted, and its chart history is cleared. Its CSV columns are left blank. The on/off choices are saved between sessions. A reading shows **no sensor** when the Arduino reports that sensor as not responding, and **—** when the connected firmware doesn't report it at all.
+
+When CSV recording is on, each row also logs `inlet_flow_slm`, `flow_sensor_temp_c`, `inlet_humidity_pct` and `inlet_temp_c`. In simulator mode, inlet flow rises while the chamber vents, and humidity and temperature hold near 45 %RH and 22.5 °C.
+
 ## 8. Safety and Fault Handling
 
 Software safety functions detect abnormal operating conditions and request shutdown when required.

@@ -1,0 +1,11 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Local app settings (written on every exit)
+monroe_settings.json

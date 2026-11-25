@@ -128,4 +128,4 @@ class SensorMixin:
             self.csv_writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), f"{now:.2f}", self.cycles + 1,
                                       self.state, f"{kpa:.3f}", raw, int(d.get("PUMP", 0)),
                                       int(d.get("SOL", 0)), d.get("VALVE"), int(d.get("BRIDGE", 0)),
-                                      d.get("AFREQ")])
+                                      d.get("AFREQ")] + self.inlet_tab.csv_values(d))

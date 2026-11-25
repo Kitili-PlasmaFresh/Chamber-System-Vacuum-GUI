@@ -12,6 +12,7 @@ class SimulatedBoard:
     The chamber pressure (self.p, kPa) is read by SimulatedSensor."""
 
     AMBIENT = 101.3
+    FLOW_FULL_SCALE = 50.0      # slm, SFM4300-50 range
 
     def __init__(self, on_line):
         self.on_line = on_line
@@ -27,6 +28,7 @@ class SimulatedBoard:
         self.p = self.AMBIENT
         self.s = dict(SOL=0, PUMP=0, BRIDGE=0, VALVE=0.0, FREQ=0, AFREQ=0.0)
         self.stream_ms = 200
+        self.flow = 0.0             # inlet flow, slm (SFM4300)
         self._connected = True
         self._stop.clear()
         threading.Thread(target=self._run, daemon=True).start()
@@ -80,11 +82,16 @@ class SimulatedBoard:
         s = self.s
         return (f"DATA MS={int(time.time() * 1000) % 10**9} SOL={s['SOL']} PUMP={s['PUMP']} "
                 f"BRIDGE={s['BRIDGE']} VALVE={s['VALVE']:.1f} FREQ={s['FREQ']} "
-                f"AFREQ={s['AFREQ']:.1f}")
+                f"AFREQ={s['AFREQ']:.1f} "
+                f"FLOWOK=1 FLOW={self.flow + random.uniform(-0.02, 0.02):.3f} FTEMP=22.80 "
+                f"HUMOK=1 HUM={45.0 + random.uniform(-0.3, 0.3):.2f} "
+                f"HTEMP={22.5 + random.uniform(-0.05, 0.05):.2f}")
 
     def _run(self):
         time.sleep(0.5)
-        for line in ("Monroe Controller (simulator)", "GP8302 detected at 0x58.", "READY"):
+        for line in ("Monroe Controller (simulator)", "GP8302 detected at 0x58.",
+                     "SFM4300 detected at 0x2A (simulated).",
+                     "CHT832X detected at 0x44.", "READY"):
             self.on_line(line)
         last = time.time()
         next_data = last
@@ -97,9 +104,14 @@ class SimulatedBoard:
                 if s["PUMP"]:
                     self.p += -(self.p - 1.0) * dt / 4.0          # pump down, tau 4 s
                 if s["SOL"] and s["VALVE"] > 0:
-                    self.p += (self.AMBIENT - self.p) * dt * s["VALVE"] / 30.0 / 2.0
+                    rate = (self.AMBIENT - self.p) * s["VALVE"] / 30.0 / 2.0   # kPa/s
+                    self.p += rate * dt
+                    # inlet gas flows while the vent fills the chamber
+                    self.flow = min(self.FLOW_FULL_SCALE, max(0.0, rate * 0.8))
                 elif not s["PUMP"]:
                     self.p += (self.AMBIENT - self.p) * dt / 600.0  # small leak
+                if not (s["SOL"] and s["VALVE"] > 0):
+                    self.flow = 0.0
                 if self.stream_ms and now >= next_data:
                     next_data = now + self.stream_ms / 1000.0
                     line = self._data()

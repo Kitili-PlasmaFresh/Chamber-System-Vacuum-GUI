@@ -10,6 +10,7 @@ from core.config import (
     CHART_SECONDS, FREQ_MAX, RECIPE_FIELDS, SENSOR_BAUDS, SENSOR_DEFAULTS, SENSOR_EOLS,
     SENSOR_UNITS, STATES, VALVE_IDEAL_MAX)
 from gui.chart import PressureChart
+from gui.inlet_panel import InletSensorsTab
 
 
 class LayoutMixin:
@@ -185,6 +186,9 @@ class LayoutMixin:
         self._apply_sensor_defaults()
         self.sensor_widgets = [self.s_baud, self.s_cmd, self.s_eol, self.s_unit, self.s_poll]
         tabs.addTab(cal, "Pressure sensor")
+
+        self.inlet_tab = InletSensorsTab()
+        tabs.addTab(self.inlet_tab, "Inlet sensors")
 
         logw = QWidget()
         lv = QVBoxLayout(logw)

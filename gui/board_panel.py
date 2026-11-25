@@ -75,6 +75,7 @@ class BoardMixin:
             self.link.close()
         self.link = None
         self.data = {}
+        self.inlet_tab.disconnected()
         self.conn_btn.setText("Connect")
         self.conn_lbl.setText("Disconnected")
         self.conn_lbl.setStyleSheet("color: gray;")
@@ -137,6 +138,8 @@ class BoardMixin:
         af = d.get("AFREQ", 0)
         self.ind["AFREQ"].setText(f"{af:,.0f} Hz" if af else "off")
         self.ind["AFREQ"].setStyleSheet("color: green; font-weight: bold;" if af else "color: gray;")
+        self.inlet_tab.update_data(d)
+
 
     def _ping(self):
         if self.link is not None and self.link.connected:
