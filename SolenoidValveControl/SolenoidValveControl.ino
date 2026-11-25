@@ -1,3 +1,4 @@
+#include <SPI.h>
 #include <Wire.h>
 
 // ==================================================
@@ -10,13 +11,14 @@
 //
 // Serial: 115200 baud, one command per line (case-insensitive)
 //
-// SOLENOID ON | SOLENOID OFF -> Solenoid valve relay on D2
+// COOLANT ON | COOLANT OFF   -> Coolant pump relay on D2
 // PUMP ON | PUMP OFF         -> Vacuum pump on D7
 // BRIDGE ON | BRIDGE OFF     -> Half-bridge power on D8
 // VALVE <0-100> or <0-100>   -> Proportional valve opening via GP8302
 // FREQ <0-40000>             -> Gate signal on D9 in Hz, 50% duty (Timer1)
 //                               0 = gate stopped, D9 held LOW
-// ALL OFF                    -> Bridge, gate, pump, solenoid off, valve 0%
+// ALL OFF                    -> Bridge, gate, vacuum pump, coolant pump off,
+//                               valve 0%
 // STREAM <ms>                -> DATA line period (0 = off, default 200 ms)
 // WATCHDOG <s>               -> ALL OFF if no command received for <s>
 //                               seconds (0 = disabled, default 5 s)
@@ -24,9 +26,10 @@
 // STATUS                     -> Send one DATA line now
 //
 // DATA line (sent every STREAM ms):
-// DATA MS=12345 SOL=0 PUMP=1 BRIDGE=0 VALVE=0.0 FREQ=20000 AFREQ=20000.0
+// DATA MS=12345 COOLANT=0 PUMP=1 BRIDGE=0 VALVE=0.0 FREQ=20000 AFREQ=20000.0
 //      FLOWOK=1 FLOW=12.345 FTEMP=23.10
 //      HUMOK=1 HUM=45.12 HTEMP=22.85
+//      TC1OK=1 TC1=85.25 TC2OK=1 TC2=84.75 TC3OK=0 TC3F=1
 // FLOW (slm) and FTEMP (deg C) come from the Sensirion SFM4300-50-P on the
 // I2C bus; they are only sent when FLOWOK=1.
 // HUM (%RH) and HTEMP (deg C) come from the Sensylink CHT832X humidity
@@ -36,6 +39,11 @@
 //   GP8302 DAC        0x58
 //   SFM4300-50-P      0x2A
 //   CHT832X           0x44 (0x45/0x46/0x47 for B/C/D address variants)
+//
+// Chamber Temp Sensors 1-3: MAX31855 thermocouple converters on hardware SPI
+//   MISO D12, SCK D13, chip selects D3 / D4 / D5. TCn (deg C) is sent when
+//   TCnOK=1; otherwise TCnF is a fault bitfield:
+//   1 = open circuit, 2 = short to GND, 4 = short to VCC, 8 = no response
 //
 // Chamber pressure is NOT read here: the Omega PXM409-USBH transmitter
 // plugs into the PC by USB and the GUI reads it directly.
@@ -85,10 +93,21 @@ const unsigned long HUM_CONVERT_MS = 20;    // wait after one-shot trigger
 const unsigned long HUM_RETRY_MS = 2000;
 
 // ==================================================
+// MAX31855 CHAMBER TEMPERATURE SENSORS
+// ==================================================
+
+const uint8_t TC_COUNT = 3;
+const uint8_t TC_CS_PINS[TC_COUNT] = {3, 4, 5};  // Chamber Temp Sensor 1, 2, 3
+const unsigned long TC_PERIOD_MS = 250;           // conversion takes <= 100 ms
+const SPISettings TC_SPI(4000000, MSBFIRST, SPI_MODE0);  // MAX31855: <= 5 MHz
+
+const uint8_t TC_FAULT_NO_RESPONSE = 8;
+
+// ==================================================
 // PINS
 // ==================================================
 
-const uint8_t SOLENOID_VALVE_PIN = 2; // D2 - Relay controlling solenoid valve
+const uint8_t COOLANT_PUMP_PIN = 2;   // D2 - Relay controlling coolant pump
 const uint8_t VACUUM_PUMP_PIN = 7;    // D7
 const uint8_t HALF_BRIDGE_PIN = 8;    // D8
 const uint8_t PWM_PIN = 9;            // D9 - Timer1 OC1A (Uno/Nano)
@@ -100,7 +119,7 @@ const uint8_t PWM_PIN = 9;            // D9 - Timer1 OC1A (Uno/Nano)
 const uint32_t MAX_GATE_FREQ = 40000; // Hz
 
 float openingPercent = 0.0;
-bool solenoidState = false;
+bool coolantState = false;
 bool pumpState = false;
 bool bridgeState = false;
 uint32_t gateFrequency = 0;   // Hz, requested
@@ -129,6 +148,11 @@ float humTempC = 0.0;
 unsigned long humTriggerMs = 0;
 unsigned long lastHumMs = 0;
 
+float tcTempC[TC_COUNT] = {0.0, 0.0, 0.0};
+uint8_t tcFault[TC_COUNT] = {TC_FAULT_NO_RESPONSE, TC_FAULT_NO_RESPONSE,
+                             TC_FAULT_NO_RESPONSE};   // 0 = reading valid
+unsigned long lastTcMs = 0;
+
 // ==================================================
 // TIMER1 GATE PWM (D9, 50% duty)
 // ==================================================
@@ -154,7 +178,7 @@ void setGateFrequency(long hz)
 {
   if (hz < 0 || hz > (long)MAX_GATE_FREQ)
   {
-    Serial.println("ERROR: Frequency must be 0 to 40000 Hz.");
+    Serial.println(F("ERROR: Frequency must be 0 to 40000 Hz."));
     return;
   }
 
@@ -163,7 +187,7 @@ void setGateFrequency(long hz)
   if (gateFrequency == 0)
   {
     gateStop();
-    Serial.println("Gate: OFF");
+    Serial.println(F("Gate: OFF"));
     return;
   }
 
@@ -186,15 +210,15 @@ void setGateFrequency(long hz)
 
       actualFrequency = F_CPU / (float)PRESCALERS[i] / (top + 1);
 
-      Serial.print("Gate frequency: ");
+      Serial.print(F("Gate frequency: "));
       Serial.print(actualFrequency, 1);
-      Serial.println(" Hz");
+      Serial.println(F(" Hz"));
       return;
     }
   }
 
   gateStop();
-  Serial.println("ERROR: Frequency too low.");
+  Serial.println(F("ERROR: Frequency too low."));
 }
 
 // ==================================================
@@ -220,7 +244,7 @@ bool setVoltage(float voltage)
 
   if (error != 0)
   {
-    Serial.print("ERROR: DAC communication error ");
+    Serial.print(F("ERROR: DAC communication error "));
     Serial.println(error);
     return false;
   }
@@ -232,16 +256,16 @@ void setValveOpening(float percentage)
 {
   if (percentage < 0.0 || percentage > 100.0)
   {
-    Serial.println("ERROR: Valve must be 0 to 100%.");
+    Serial.println(F("ERROR: Valve must be 0 to 100%."));
     return;
   }
 
   if (setVoltage(MAX_VOLTAGE * (percentage / 100.0)))
   {
     openingPercent = percentage;
-    Serial.print("Valve: ");
+    Serial.print(F("Valve: "));
     Serial.print(openingPercent, 1);
-    Serial.println("%");
+    Serial.println(F("%"));
   }
 }
 
@@ -324,11 +348,11 @@ bool flowInit()
   delay(15);  // first measurement ready ~12 ms after start
 
   flowReady = true;
-  Serial.print("SFM4300 detected at 0x2A (scale ");
+  Serial.print(F("SFM4300 detected at 0x2A (scale "));
   Serial.print(flowScale);
-  Serial.print(", offset ");
+  Serial.print(F(", offset "));
   Serial.print(flowOffset);
-  Serial.println(").");
+  Serial.println(F(")."));
   return true;
 }
 
@@ -348,7 +372,7 @@ void readFlow()
   uint16_t w[3];
   if (!i2cReadWords(FLOW_ADDR, w, 3))
   {
-    if (flowValid) Serial.println("ERROR: SFM4300 read failed.");
+    if (flowValid) Serial.println(F("ERROR: SFM4300 read failed."));
     flowValid = false;
     flowReady = false;            // re-initialise on next retry
     lastFlowInitMs = millis();
@@ -380,21 +404,21 @@ bool humInit()
   if (!i2cReadWords(HUM_ADDR, &id, 1)) return false;
   if (id != HUM_MANUFACTURER_ID)
   {
-    Serial.print("ERROR: Unexpected device at humidity address, ID 0x");
+    Serial.print(F("ERROR: Unexpected device at humidity address, ID 0x"));
     Serial.println(id, HEX);
     return false;
   }
 
   humReady = true;
-  Serial.print("CHT832X detected at 0x");
+  Serial.print(F("CHT832X detected at 0x"));
   Serial.print(HUM_ADDR, HEX);
-  Serial.println(".");
+  Serial.println(F("."));
   return true;
 }
 
 void humFail()
 {
-  if (humValid) Serial.println("ERROR: CHT832X read failed.");
+  if (humValid) Serial.println(F("ERROR: CHT832X read failed."));
   humValid = false;
   humReady = false;
   humPending = false;
@@ -440,15 +464,66 @@ void serviceHumidity()
 }
 
 // ==================================================
+// MAX31855 THERMOCOUPLES (SPI)
+// ==================================================
+
+// 32-bit frame: D31-D18 thermocouple temp (signed, 0.25 C), D16 fault,
+// D15-D4 cold-junction temp, D2 short to VCC, D1 short to GND, D0 open circuit
+uint32_t tcReadFrame(uint8_t csPin)
+{
+  SPI.beginTransaction(TC_SPI);
+  digitalWrite(csPin, LOW);
+  uint32_t v = 0;
+  for (uint8_t i = 0; i < 4; i++)
+    v = (v << 8) | SPI.transfer(0x00);
+  digitalWrite(csPin, HIGH);
+  SPI.endTransaction();
+  return v;
+}
+
+void readThermocouples()
+{
+  for (uint8_t i = 0; i < TC_COUNT; i++)
+  {
+    uint32_t v = tcReadFrame(TC_CS_PINS[i]);
+
+    if (v == 0x00000000UL || v == 0xFFFFFFFFUL)
+    {
+      tcFault[i] = TC_FAULT_NO_RESPONSE;    // MISO stuck: chip absent/unpowered
+    }
+    else if (v & 0x00010000UL)
+    {
+      tcFault[i] = (uint8_t)(v & 0x07);     // OC / SCG / SCV bits
+    }
+    else
+    {
+      int16_t raw = (int16_t)((v >> 18) & 0x3FFF);
+      if (raw & 0x2000) raw |= (int16_t)0xC000;   // sign-extend 14 bits
+      tcTempC[i] = raw * 0.25;
+      tcFault[i] = 0;
+    }
+  }
+}
+
+void serviceThermocouples()
+{
+  if (millis() - lastTcMs >= TC_PERIOD_MS)
+  {
+    lastTcMs = millis();
+    readThermocouples();
+  }
+}
+
+// ==================================================
 // DIGITAL OUTPUTS
 // ==================================================
 
-void setSolenoidValve(bool state)
+void setCoolantPump(bool state)
 {
-  // HIGH energises relay: COM1 -> NO1 supplies 12 V to the valve.
-  digitalWrite(SOLENOID_VALVE_PIN, state ? HIGH : LOW);
-  solenoidState = state;
-  Serial.print("Solenoid: ");
+  // HIGH energises relay: COM1 -> NO1 supplies 12 V to the coolant pump.
+  digitalWrite(COOLANT_PUMP_PIN, state ? HIGH : LOW);
+  coolantState = state;
+  Serial.print(F("Coolant pump: "));
   Serial.println(state ? "ON" : "OFF");
 }
 
@@ -456,7 +531,7 @@ void setVacuumPump(bool state)
 {
   digitalWrite(VACUUM_PUMP_PIN, state ? HIGH : LOW);
   pumpState = state;
-  Serial.print("Pump: ");
+  Serial.print(F("Vacuum pump: "));
   Serial.println(state ? "ON" : "OFF");
 }
 
@@ -464,7 +539,7 @@ void setHalfBridge(bool state)
 {
   digitalWrite(HALF_BRIDGE_PIN, state ? HIGH : LOW);
   bridgeState = state;
-  Serial.print("Bridge: ");
+  Serial.print(F("Bridge: "));
   Serial.println(state ? "ON" : "OFF");
 }
 
@@ -474,7 +549,7 @@ void allOff()
   setGateFrequency(0);
   setVacuumPump(false);
   setValveOpening(0.0);
-  setSolenoidValve(false);
+  setCoolantPump(false);
 }
 
 // ==================================================
@@ -483,37 +558,55 @@ void allOff()
 
 void sendData()
 {
-  Serial.print("DATA MS=");
+  Serial.print(F("DATA MS="));
   Serial.print(millis());
-  Serial.print(" SOL=");
-  Serial.print(solenoidState ? 1 : 0);
-  Serial.print(" PUMP=");
+  Serial.print(F(" COOLANT="));
+  Serial.print(coolantState ? 1 : 0);
+  Serial.print(F(" PUMP="));
   Serial.print(pumpState ? 1 : 0);
-  Serial.print(" BRIDGE=");
+  Serial.print(F(" BRIDGE="));
   Serial.print(bridgeState ? 1 : 0);
-  Serial.print(" VALVE=");
+  Serial.print(F(" VALVE="));
   Serial.print(openingPercent, 1);
-  Serial.print(" FREQ=");
+  Serial.print(F(" FREQ="));
   Serial.print(gateFrequency);
-  Serial.print(" AFREQ=");
+  Serial.print(F(" AFREQ="));
   Serial.print(actualFrequency, 1);
-  Serial.print(" FLOWOK=");
+  Serial.print(F(" FLOWOK="));
   Serial.print(flowValid ? 1 : 0);
   if (flowValid)
   {
-    Serial.print(" FLOW=");
+    Serial.print(F(" FLOW="));
     Serial.print(flowSlm, 3);
-    Serial.print(" FTEMP=");
+    Serial.print(F(" FTEMP="));
     Serial.print(flowTempC, 2);
   }
-  Serial.print(" HUMOK=");
+  Serial.print(F(" HUMOK="));
   Serial.print(humValid ? 1 : 0);
   if (humValid)
   {
-    Serial.print(" HUM=");
+    Serial.print(F(" HUM="));
     Serial.print(humRh, 2);
-    Serial.print(" HTEMP=");
+    Serial.print(F(" HTEMP="));
     Serial.print(humTempC, 2);
+  }
+  for (uint8_t i = 0; i < TC_COUNT; i++)
+  {
+    Serial.print(F(" TC"));
+    Serial.print(i + 1);
+    if (tcFault[i]) Serial.print(F("OK=0 TC"));
+    else Serial.print(F("OK=1 TC"));
+    Serial.print(i + 1);
+    if (tcFault[i])
+    {
+      Serial.print(F("F="));
+      Serial.print(tcFault[i]);
+    }
+    else
+    {
+      Serial.print(F("="));
+      Serial.print(tcTempC[i], 2);
+    }
   }
   Serial.println();
 }
@@ -555,8 +648,8 @@ void handleCommand(String input)
   if (input == "PING") return;
   if (input == "STATUS") { readFlow(); sendData(); return; }
 
-  if (input == "SOLENOID ON")  { setSolenoidValve(true);  return; }
-  if (input == "SOLENOID OFF") { setSolenoidValve(false); return; }
+  if (input == "COOLANT ON")   { setCoolantPump(true);    return; }
+  if (input == "COOLANT OFF")  { setCoolantPump(false);   return; }
   if (input == "PUMP ON")      { setVacuumPump(true);     return; }
   if (input == "PUMP OFF")     { setVacuumPump(false);    return; }
   if (input == "BRIDGE ON")    { setHalfBridge(true);     return; }
@@ -568,21 +661,21 @@ void handleCommand(String input)
   if ((arg = argAfter(input, "FREQ")).length())
   {
     if (isNumber(arg, false)) setGateFrequency(arg.toInt());
-    else Serial.println("ERROR: Usage FREQ 0-40000");
+    else Serial.println(F("ERROR: Usage FREQ 0-40000"));
     return;
   }
 
   if ((arg = argAfter(input, "STREAM")).length())
   {
     if (isNumber(arg, false)) streamPeriodMs = arg.toInt();
-    else Serial.println("ERROR: Usage STREAM <ms>");
+    else Serial.println(F("ERROR: Usage STREAM <ms>"));
     return;
   }
 
   if ((arg = argAfter(input, "WATCHDOG")).length())
   {
     if (isNumber(arg, false)) watchdogMs = arg.toInt() * 1000UL;
-    else Serial.println("ERROR: Usage WATCHDOG <seconds>");
+    else Serial.println(F("ERROR: Usage WATCHDOG <seconds>"));
     return;
   }
 
@@ -597,7 +690,7 @@ void handleCommand(String input)
     return;
   }
 
-  Serial.println("ERROR: Invalid command.");
+  Serial.println(F("ERROR: Invalid command."));
 }
 
 // ==================================================
@@ -612,12 +705,20 @@ void setup()
   Wire.begin();
   Wire.setClock(100000);
 
-  pinMode(SOLENOID_VALVE_PIN, OUTPUT);
+  // MAX31855 chip selects idle HIGH before the SPI bus starts
+  for (uint8_t i = 0; i < TC_COUNT; i++)
+  {
+    pinMode(TC_CS_PINS[i], OUTPUT);
+    digitalWrite(TC_CS_PINS[i], HIGH);
+  }
+  SPI.begin();   // D13 SCK, D12 MISO (D11 MOSI / D10 SS driven but unused)
+
+  pinMode(COOLANT_PUMP_PIN, OUTPUT);
   pinMode(VACUUM_PUMP_PIN, OUTPUT);
   pinMode(HALF_BRIDGE_PIN, OUTPUT);
   pinMode(PWM_PIN, OUTPUT);
 
-  digitalWrite(SOLENOID_VALVE_PIN, LOW);
+  digitalWrite(COOLANT_PUMP_PIN, LOW);
   digitalWrite(VACUUM_PUMP_PIN, LOW);
   digitalWrite(HALF_BRIDGE_PIN, LOW);
   gateStop();
@@ -625,34 +726,34 @@ void setup()
   delay(1000);
 
   Serial.println();
-  Serial.println("Monroe Controller (thin firmware)");
+  Serial.println(F("Monroe Controller (thin firmware)"));
 
   Wire.beginTransmission(DAC_ADDR);
   if (Wire.endTransmission() != 0)
   {
-    Serial.println("ERROR: GP8302 not detected.");
+    Serial.println(F("ERROR: GP8302 not detected."));
     while (true)
     {
       delay(1000);
     }
   }
-  Serial.println("GP8302 detected at 0x58.");
+  Serial.println(F("GP8302 detected at 0x58."));
 
   // Flow sensor is optional: keep running without it and retry in loop()
   lastFlowInitMs = millis();
   if (!flowInit())
-    Serial.println("ERROR: SFM4300 not detected at 0x2A, will retry.");
+    Serial.println(F("ERROR: SFM4300 not detected at 0x2A, will retry."));
 
   // Humidity sensor is optional too
   lastHumMs = millis();
   if (!humInit())
-    Serial.println("ERROR: CHT832X not detected, will retry.");
+    Serial.println(F("ERROR: CHT832X not detected, will retry."));
 
   setValveOpening(0.0);
-  setSolenoidValve(false);
+  setCoolantPump(false);
 
   lastCommandMs = millis();
-  Serial.println("READY");
+  Serial.println(F("READY"));
 }
 
 // ==================================================
@@ -674,14 +775,15 @@ void loop()
       millis() - lastCommandMs >= watchdogMs)
   {
     watchdogTripped = true;
-    if (bridgeState || pumpState || solenoidState || gateFrequency || openingPercent > 0)
+    if (bridgeState || pumpState || coolantState || gateFrequency || openingPercent > 0)
     {
-      Serial.println("WATCHDOG: no commands from PC, ALL OFF");
+      Serial.println(F("WATCHDOG: no commands from PC, ALL OFF"));
       allOff();
     }
   }
 
   serviceHumidity();
+  serviceThermocouples();
 
   if (streamPeriodMs > 0 && millis() - lastStreamMs >= streamPeriodMs)
   {

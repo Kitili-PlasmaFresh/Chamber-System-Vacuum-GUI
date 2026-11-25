@@ -13,6 +13,8 @@ class SimulatedBoard:
 
     AMBIENT = 101.3
     FLOW_FULL_SCALE = 50.0      # slm, SFM4300-50 range
+    ROOM_C = 22.0
+    TC_GAIN = (1.0, 0.9, 0.8)   # chamber thermocouples 1-3 sit at different spots
 
     def __init__(self, on_line):
         self.on_line = on_line
@@ -26,9 +28,10 @@ class SimulatedBoard:
 
     def open(self, _port):
         self.p = self.AMBIENT
-        self.s = dict(SOL=0, PUMP=0, BRIDGE=0, VALVE=0.0, FREQ=0, AFREQ=0.0)
+        self.s = dict(COOLANT=0, PUMP=0, BRIDGE=0, VALVE=0.0, FREQ=0, AFREQ=0.0)
         self.stream_ms = 200
         self.flow = 0.0             # inlet flow, slm (SFM4300)
+        self.tc = [self.ROOM_C] * 3  # chamber temperatures, deg C (MAX31855 x3)
         self._connected = True
         self._stop.clear()
         threading.Thread(target=self._run, daemon=True).start()
@@ -48,15 +51,15 @@ class SimulatedBoard:
                 pass
             elif c == "STATUS":
                 out.append(self._data())
-            elif c in ("SOLENOID ON", "SOLENOID OFF"):
-                s["SOL"] = int(c.endswith("ON")); out.append(f"Solenoid: {c[9:]}")
+            elif c in ("COOLANT ON", "COOLANT OFF"):
+                s["COOLANT"] = int(c.endswith("ON")); out.append(f"Coolant pump: {c[8:]}")
             elif c in ("PUMP ON", "PUMP OFF"):
-                s["PUMP"] = int(c.endswith("ON")); out.append(f"Pump: {c[5:]}")
+                s["PUMP"] = int(c.endswith("ON")); out.append(f"Vacuum pump: {c[5:]}")
             elif c in ("BRIDGE ON", "BRIDGE OFF"):
                 s["BRIDGE"] = int(c.endswith("ON")); out.append(f"Bridge: {c[7:]}")
             elif c == "ALL OFF":
-                s.update(SOL=0, PUMP=0, BRIDGE=0, VALVE=0.0, FREQ=0, AFREQ=0.0)
-                out += ["Bridge: OFF", "Gate: OFF", "Pump: OFF", "Valve: 0.0%", "Solenoid: OFF"]
+                s.update(COOLANT=0, PUMP=0, BRIDGE=0, VALVE=0.0, FREQ=0, AFREQ=0.0)
+                out += ["Bridge: OFF", "Gate: OFF", "Vacuum pump: OFF", "Valve: 0.0%", "Coolant pump: OFF"]
             elif c.startswith("FREQ "):
                 f = int(c[5:]); s["FREQ"] = f
                 if f:
@@ -80,12 +83,14 @@ class SimulatedBoard:
 
     def _data(self):
         s = self.s
-        return (f"DATA MS={int(time.time() * 1000) % 10**9} SOL={s['SOL']} PUMP={s['PUMP']} "
+        return (f"DATA MS={int(time.time() * 1000) % 10**9} COOLANT={s['COOLANT']} PUMP={s['PUMP']} "
                 f"BRIDGE={s['BRIDGE']} VALVE={s['VALVE']:.1f} FREQ={s['FREQ']} "
                 f"AFREQ={s['AFREQ']:.1f} "
                 f"FLOWOK=1 FLOW={self.flow + random.uniform(-0.02, 0.02):.3f} FTEMP=22.80 "
                 f"HUMOK=1 HUM={45.0 + random.uniform(-0.3, 0.3):.2f} "
-                f"HTEMP={22.5 + random.uniform(-0.05, 0.05):.2f}")
+                f"HTEMP={22.5 + random.uniform(-0.05, 0.05):.2f}"
+                + "".join(f" TC{i + 1}OK=1 TC{i + 1}={t + random.uniform(-0.25, 0.25):.2f}"
+                          for i, t in enumerate(self.tc)))
 
     def _run(self):
         time.sleep(0.5)
@@ -103,15 +108,19 @@ class SimulatedBoard:
                 s = self.s
                 if s["PUMP"]:
                     self.p += -(self.p - 1.0) * dt / 4.0          # pump down, tau 4 s
-                if s["SOL"] and s["VALVE"] > 0:
+                if s["VALVE"] > 0:                                   # vent through the valve
                     rate = (self.AMBIENT - self.p) * s["VALVE"] / 30.0 / 2.0   # kPa/s
                     self.p += rate * dt
                     # inlet gas flows while the vent fills the chamber
                     self.flow = min(self.FLOW_FULL_SCALE, max(0.0, rate * 0.8))
                 elif not s["PUMP"]:
                     self.p += (self.AMBIENT - self.p) * dt / 600.0  # small leak
-                if not (s["SOL"] and s["VALVE"] > 0):
+                if not s["VALVE"] > 0:
                     self.flow = 0.0
+                # plasma heats the chamber; the coolant pump pulls it back down
+                for i, g in enumerate(self.TC_GAIN):
+                    goal = self.ROOM_C + (60.0 * g if s["BRIDGE"] else 0.0) - (5.0 if s["COOLANT"] else 0.0)
+                    self.tc[i] += (goal - self.tc[i]) * dt / 15.0
                 if self.stream_ms and now >= next_data:
                     next_data = now + self.stream_ms / 1000.0
                     line = self._data()

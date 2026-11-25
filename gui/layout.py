@@ -10,7 +10,7 @@ from core.config import (
     CHART_SECONDS, FREQ_MAX, RECIPE_FIELDS, SENSOR_BAUDS, SENSOR_DEFAULTS, SENSOR_EOLS,
     SENSOR_UNITS, STATES, VALVE_IDEAL_MAX)
 from gui.chart import PressureChart
-from gui.inlet_panel import InletSensorsTab
+from gui.sensors_tab import InputSensorsTab, ChamberTempsTab
 
 
 class LayoutMixin:
@@ -106,7 +106,7 @@ class LayoutMixin:
 
         live = QGroupBox("Live data")
         ll = QGridLayout(live)
-        self.p_lbl = QLabel("— kPa")
+        self.p_lbl = QLabel("— bar")
         self.p_lbl.setStyleSheet("font-size: 28px; font-weight: bold;")
         self.p_lbl.setMinimumWidth(180)
         ll.addWidget(self.p_lbl, 0, 0, 2, 1)
@@ -114,7 +114,7 @@ class LayoutMixin:
         self.pv_lbl.setStyleSheet("color: gray;")
         ll.addWidget(self.pv_lbl, 2, 0)
         self.ind = {}
-        for i, (k, name) in enumerate([("PUMP", "Vacuum pump"), ("SOL", "Solenoid"),
+        for i, (k, name) in enumerate([("PUMP", "Vacuum pump"), ("COOLANT", "Coolant pump"),
                                        ("BRIDGE", "Half-bridge"), ("VALVE", "Valve"),
                                        ("AFREQ", "Gate freq")]):
             n = QLabel(name + ":")
@@ -155,7 +155,7 @@ class LayoutMixin:
         cf = QFormLayout(cal)
         note = QLabel("Omega PXM409-USBH transmitter, read directly over its own USB port. The GUI "
                       "sends the read command, takes the first number in the reply, and converts it "
-                      "from the unit below to kPa. Use 'Test sensor' to see the raw replies.")
+                      "from the unit below to bar. Use 'Test sensor' to see the raw replies.")
         note.setWordWrap(True)
         cf.addRow(note)
         self.s_baud = QComboBox()
@@ -187,8 +187,11 @@ class LayoutMixin:
         self.sensor_widgets = [self.s_baud, self.s_cmd, self.s_eol, self.s_unit, self.s_poll]
         tabs.addTab(cal, "Pressure sensor")
 
-        self.inlet_tab = InletSensorsTab()
-        tabs.addTab(self.inlet_tab, "Inlet sensors")
+        self.sensors_tab = InputSensorsTab()
+        tabs.addTab(self.sensors_tab, "Input Sensors")
+
+        self.chamber_tab = ChamberTempsTab()
+        tabs.addTab(self.chamber_tab, "Chamber Temperature Sensors")
 
         logw = QWidget()
         lv = QVBoxLayout(logw)
@@ -228,11 +231,11 @@ class LayoutMixin:
         g.addWidget(note, 0, 0, 1, 3)
         self.pump_btn = QPushButton("Vacuum pump ON/OFF")
         self.pump_btn.clicked.connect(lambda: self._toggle("PUMP"))
-        self.sol_btn = QPushButton("Solenoid ON/OFF")
-        self.sol_btn.clicked.connect(lambda: self._toggle("SOL"))
+        self.coolant_btn = QPushButton("Coolant pump ON/OFF")
+        self.coolant_btn.clicked.connect(lambda: self._toggle("COOLANT"))
         self.bridge_btn = QPushButton("Half-bridge power ON/OFF")
         self.bridge_btn.clicked.connect(lambda: self._toggle("BRIDGE"))
-        for r, b in enumerate((self.pump_btn, self.sol_btn, self.bridge_btn), start=1):
+        for r, b in enumerate((self.pump_btn, self.coolant_btn, self.bridge_btn), start=1):
             g.addWidget(b, r, 0, 1, 3)
 
         g.addWidget(QLabel("Valve %"), 4, 0)
@@ -265,6 +268,6 @@ class LayoutMixin:
         g.setRowStretch(8, 1)
         g.setColumnStretch(0, 1)
 
-        self.manual_widgets = [self.pump_btn, self.sol_btn, self.bridge_btn, self.man_valve,
+        self.manual_widgets = [self.pump_btn, self.coolant_btn, self.bridge_btn, self.man_valve,
                                self.man_valve_btn, self.man_valve_slider, self.man_override,
                                self.man_freq, self.man_freq_btn]

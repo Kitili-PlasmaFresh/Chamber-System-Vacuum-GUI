@@ -8,7 +8,7 @@ class ManualControlsMixin:
 
     def _toggle(self, key):
         on = bool(self.data.get(key))
-        name = {"PUMP": "PUMP", "SOL": "SOLENOID", "BRIDGE": "BRIDGE"}[key]
+        name = {"PUMP": "PUMP", "COOLANT": "COOLANT", "BRIDGE": "BRIDGE"}[key]
         self.send(f"{name} {'OFF' if on else 'ON'}")
 
     def _manual_override(self, on):

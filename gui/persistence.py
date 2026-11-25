@@ -6,7 +6,7 @@ import time
 
 from PyQt6.QtWidgets import QFileDialog
 
-from core.config import SENSOR_DEFAULTS, SETTINGS_FILE
+from core.config import KPA_PER_BAR, PRESSURE_FIELDS, SENSOR_DEFAULTS, SETTINGS_FILE
 
 
 class PersistenceMixin:
@@ -18,6 +18,13 @@ class PersistenceMixin:
                 saved = json.load(fh)
         except (OSError, ValueError):
             return
+        if saved.get("pressure_unit") != "bar":
+            # saved before the GUI switched from kPa to bar: convert the pressure fields
+            for key in PRESSURE_FIELDS:
+                try:
+                    saved[key] = f"{float(saved[key]) / KPA_PER_BAR:g}"
+                except (KeyError, ValueError):
+                    pass
         for key, (edit, *_rest) in self.fields.items():
             if key in saved:
                 edit.setText(str(saved[key]))
@@ -26,17 +33,21 @@ class PersistenceMixin:
         self._apply_sensor_defaults({k: saved[k] for k in SENSOR_DEFAULTS if k in saved})
         self._saved_sensor_port = saved.get("sensor_port", "")
         self._saved_board_port = saved.get("board_port", "")
-        self.inlet_tab.set_state(saved.get("inlet_monitoring"))
+        # "inlet_monitoring" is the key used before the chamber thermocouples were added
+        monitoring = saved.get("sensor_monitoring", saved.get("inlet_monitoring"))
+        self.sensors_tab.set_state(monitoring)
+        self.chamber_tab.set_state(monitoring)
 
     def _save_settings(self):
         out = {k: v[0].text() for k, v in self.fields.items()}
+        out["pressure_unit"] = "bar"
         out["vent_override"] = self.vent_override.isChecked()
         out["cycles_done"] = self.cycles
         out.update(sensor_baud=self.s_baud.currentText(), sensor_cmd=self.s_cmd.text(),
                    sensor_eol=self.s_eol.currentText(), sensor_unit=self.s_unit.currentText(),
                    sensor_poll_ms=self.s_poll.value(), sensor_port=self.sensor_port_box.currentText(),
                    board_port=self.port_box.currentText(),
-                   inlet_monitoring=self.inlet_tab.get_state())
+                   sensor_monitoring={**self.sensors_tab.get_state(), **self.chamber_tab.get_state()})
         try:
             with open(SETTINGS_FILE, "w") as fh:
                 json.dump(out, fh, indent=2)
@@ -50,10 +61,11 @@ class PersistenceMixin:
             return
         self.csv_file = open(path, "w", newline="")
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(["time", "epoch_s", "cycle", "state", "pressure_kpa", "sensor_reply",
-                                  "pump", "solenoid", "valve_pct", "bridge", "gate_hz",
-                                  "inlet_flow_slm", "flow_sensor_temp_c", "inlet_humidity_pct",
-                                  "inlet_temp_c"])
+        self.csv_writer.writerow(["time", "epoch_s", "cycle", "state", "pressure_bar", "sensor_reply",
+                                  "vacuum_pump", "coolant_pump", "valve_pct", "bridge", "gate_hz",
+                                  "inlet_flow_slm", "inlet_temp_c", "inlet_humidity_pct",
+                                  "humidity_sensor_temp_c", "chamber_temp_1_c", "chamber_temp_2_c",
+                                  "chamber_temp_3_c"])
         self.append_log(f"Recording to {path}")
 
     def _close_csv(self):

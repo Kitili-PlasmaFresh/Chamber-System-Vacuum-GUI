@@ -35,7 +35,7 @@ class App(LayoutMixin, BoardMixin, SensorMixin, ManualControlsMixin, RunControlM
         self.history = []
         self.sensor_q = queue.Queue()
         self.sensor = None
-        self.sensor_p = None       # latest pressure, kPa
+        self.sensor_p = None       # latest pressure, bar
         self.sensor_time = 0.0
         self.sensor_raw = ""
 
@@ -107,7 +107,7 @@ class App(LayoutMixin, BoardMixin, SensorMixin, ManualControlsMixin, RunControlM
         return val
 
     def pressure(self):
-        """Latest chamber pressure in kPa from the Omega sensor, or None if stale."""
+        """Latest chamber pressure in bar from the Omega sensor, or None if stale."""
         if self.sensor_p is None or time.time() - self.sensor_time > DATA_STALE_S:
             return None
         return self.sensor_p

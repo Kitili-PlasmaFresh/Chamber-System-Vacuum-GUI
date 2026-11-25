@@ -11,7 +11,7 @@ Cycle (from the treatment flowchart):
   -> Chamber Evacuation: pump ON until pressure <= target, pump OFF, wait t1
   -> Ramp half-bridge gate to target frequency, half-bridge power ON
   -> Plasma Engaged for the treatment time
-  -> Solenoid valve to target %, wait for ambient pressure, wait t2
+  -> Proportional valve to target %, wait for ambient pressure, wait t2
   -> Half-bridge power OFF -> Plasma Disengaged -> Cycles += 1 -> Idle
 
 Hardware: Arduino controller (USB serial) + Omega PXM409-USBH pressure

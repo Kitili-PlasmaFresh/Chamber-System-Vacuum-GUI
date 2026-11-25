@@ -33,7 +33,7 @@ class PressureChart(QWidget):
                 marks.append((self.app.get(key), col, name))
             except ValueError:
                 pass
-        ymax = max([110.0] + pts + [m[0] * 1.05 for m in marks])
+        ymax = max([1.1] + pts + [m[0] * 1.05 for m in marks])
         ymin = min([0.0] + pts)
 
         def y(v):
@@ -48,7 +48,7 @@ class PressureChart(QWidget):
             qp.drawLine(QPointF(L, y(v)), QPointF(w - R, y(v)))
             qp.setPen(QPen(QColor("#777777")))
             qp.drawText(QRectF(0, y(v) - 8, L - 4, 16),
-                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{v:.0f}")
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{v:.2f}")
         for v, col, name in marks:
             pen = QPen(QColor(col))
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -57,7 +57,7 @@ class PressureChart(QWidget):
             qp.drawText(QRectF(L, y(v) - 16, w - R - L - 2, 14), Qt.AlignmentFlag.AlignRight, name)
         qp.setPen(QPen(QColor("#777777")))
         qp.drawText(QRectF(L, h - B, 100, B), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    f"-{CHART_SECONDS}s   (kPa)")
+                    f"-{CHART_SECONDS}s   (bar)")
         qp.drawText(QRectF(w - R - 100, h - B, 100, B),
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "now")
         if len(hist) > 1:

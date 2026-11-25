@@ -55,6 +55,7 @@ class CycleMixin:
         if st == "IDLE":
             # Cycles >= Target?  True -> stay idle (run complete)
             if self.cycles >= g("target_cycles"):
+                self.send("COOLANT OFF")      # coolant pump runs for the whole run
                 self.armed = False
                 self._close_csv()
                 self._update_locks()
@@ -62,17 +63,17 @@ class CycleMixin:
                 self._set_detail(f"Complete: {self.cycles} cycle(s) done.", "done")
                 return
             # Start Treatment? True -> Chamber Evacuation
-            for cmd in ("BRIDGE OFF", "FREQ 0", "VALVE 0", "SOLENOID OFF", "PUMP ON"):
+            for cmd in ("BRIDGE OFF", "FREQ 0", "VALVE 0", "COOLANT ON", "PUMP ON"):
                 self.send(cmd)
             self._enter_state("EVACUATE")
 
         elif st == "EVACUATE":
-            self._detail(f"Pumping down: {p:.1f} kPa → target {g('target_pressure'):.1f} kPa", el)
+            self._detail(f"Pumping down: {p:.3f} bar → target {g('target_pressure'):.3f} bar", el)
             if p <= g("target_pressure"):
                 self.send("PUMP OFF")
                 self._enter_state("EVAC_WAIT")
             elif el > g("evac_timeout"):
-                self.abort(f"Evacuation timeout: {p:.1f} kPa after {el:.0f} s")
+                self.abort(f"Evacuation timeout: {p:.3f} bar after {el:.0f} s")
 
         elif st == "EVAC_WAIT":
             self._detail(f"Waiting t1: {max(0, g('evac_wait') - el):.1f} s left", el)
@@ -106,22 +107,21 @@ class CycleMixin:
             left = g("treat_time") - el
             self._detail(f"Plasma ON: {max(0, left):.1f} s left of {g('treat_time'):g} s", el)
             if el >= g("treat_time"):
-                self.send("SOLENOID ON")
                 self.send(f"VALVE {g('vent_valve'):.1f}")
                 self._enter_state("VENT")
 
         elif st == "VENT":
             amb = g("ambient_pressure") - g("ambient_tol")
-            self._detail(f"Venting: {p:.1f} kPa → ambient ≥ {amb:.1f} kPa", el)
+            self._detail(f"Venting: {p:.3f} bar → ambient ≥ {amb:.3f} bar", el)
             if p >= amb:
                 self._enter_state("VENT_WAIT")
             elif el > g("vent_timeout"):
-                self.abort(f"Venting timeout: {p:.1f} kPa after {el:.0f} s")
+                self.abort(f"Venting timeout: {p:.3f} bar after {el:.0f} s")
 
         elif st == "VENT_WAIT":
             self._detail(f"Waiting t2: {max(0, g('vent_wait') - el):.1f} s left", el)
             if el >= g("vent_wait"):
-                for cmd in ("BRIDGE OFF", "FREQ 0", "VALVE 0", "SOLENOID OFF"):
+                for cmd in ("BRIDGE OFF", "FREQ 0", "VALVE 0"):
                     self.send(cmd)
                 self._enter_state("DISENGAGE")
 

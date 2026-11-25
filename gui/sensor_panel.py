@@ -6,7 +6,8 @@ import time
 
 from PyQt6.QtWidgets import QMessageBox
 
-from core.config import CHART_SECONDS, DATA_STALE_S, SENSOR_EOLS, SENSOR_UNITS, SIM_PORT
+from core.config import (CHART_SECONDS, DATA_STALE_S, KPA_PER_BAR, SENSOR_EOLS, SENSOR_UNITS,
+                         SIM_PORT)
 from hardware.pressure_sensor import PressureSensor
 from hardware.serial_link import serial
 from hardware.simulator import SimulatedBoard, SimulatedSensor
@@ -112,20 +113,22 @@ class SensorMixin:
             self.pv_lbl.setText(f"sensor reply: {item[1]!r}")
             return
         _k, kpa, raw = item
+        bar = kpa / KPA_PER_BAR          # the hardware layer reports kPa; the GUI works in bar
         now = time.time()
-        self.sensor_p, self.sensor_time, self.sensor_raw = kpa, now, raw
+        self.sensor_p, self.sensor_time, self.sensor_raw = bar, now, raw
         self.s_raw_lbl.setText(f"Last reply: {raw!r}")
         if self.sensor_lbl.styleSheet() != "color: green;":
             self.sensor_lbl.setText(f"Reading on {self.sensor_port_box.currentText()}")
             self.sensor_lbl.setStyleSheet("color: green;")
-        self.history.append((now, kpa))
+        self.history.append((now, bar))
         while self.history and now - self.history[0][0] > CHART_SECONDS:
             self.history.pop(0)
-        self.p_lbl.setText(f"{kpa:.2f} kPa")
-        self.pv_lbl.setText(f"{kpa / 100:.4f} bar   (sensor sent {raw!r} {self.s_unit.currentText()})")
+        self.p_lbl.setText(f"{bar:.3f} bar")
+        self.pv_lbl.setText(f"sensor sent {raw!r} {self.s_unit.currentText()}")
         if self.csv_writer:
             d = self.data
             self.csv_writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), f"{now:.2f}", self.cycles + 1,
-                                      self.state, f"{kpa:.3f}", raw, int(d.get("PUMP", 0)),
-                                      int(d.get("SOL", 0)), d.get("VALVE"), int(d.get("BRIDGE", 0)),
-                                      d.get("AFREQ")] + self.inlet_tab.csv_values(d))
+                                      self.state, f"{bar:.5f}", raw, int(d.get("PUMP", 0)),
+                                      int(d.get("COOLANT", 0)), d.get("VALVE"), int(d.get("BRIDGE", 0)),
+                                      d.get("AFREQ")] + self.sensors_tab.csv_values(d)
+                                      + self.chamber_tab.csv_values(d))

@@ -19,19 +19,23 @@ DATA_STALE_S = 2.0       # abort a running cycle if pressure readings stop
 # Omega USBH transmitter defaults (editable on the Pressure sensor tab)
 SENSOR_BAUDS = ["115200", "9600", "19200", "38400", "57600"]
 SENSOR_EOLS = {"CR": "\r", "CRLF": "\r\n", "LF": "\n"}
-# multiply a reading in this unit by the factor to get kPa
+# multiply a reading in this unit by the factor to get kPa (the hardware layer's unit;
+# the GUI converts to bar with KPA_PER_BAR)
 SENSOR_UNITS = {"bar": 100.0, "mbar": 0.1, "kPa": 1.0, "Pa": 0.001, "psi": 6.894757,
                 "Torr": 0.1333224, "inHg": 3.386389, "atm": 101.325}
 SENSOR_DEFAULTS = dict(sensor_baud="115200", sensor_cmd="P", sensor_eol="CR",
                        sensor_unit="bar", sensor_poll_ms=200)
 CHART_SECONDS = 180
+KPA_PER_BAR = 100.0
+# recipe fields holding a pressure; stored in bar (settings files from before were in kPa)
+PRESSURE_FIELDS = ("target_pressure", "ambient_pressure", "ambient_tol")
 
 KV_RE = re.compile(r"(\w+)=([-\d.]+)")
 
 # Recipe / calibration fields: key -> (label, default, type, min, max)
 RECIPE_FIELDS = [
     ("target_cycles", "Target cycles", 1, int, 1, 10000),
-    ("target_pressure", "Target (evacuated) pressure, kPa", 10.0, float, 0, 200),
+    ("target_pressure", "Target (evacuated) pressure, bar", 0.1, float, 0, 2.0),
     ("evac_wait", "Wait t1 after evacuation, s", 5.0, float, 0, 3600),
     ("evac_timeout", "Evacuation timeout, s", 300.0, float, 1, 36000),
     ("target_freq", "Target gate frequency, Hz", 20000, int, 1, FREQ_MAX),
@@ -39,9 +43,9 @@ RECIPE_FIELDS = [
     ("ramp_step", "Ramp step, Hz (0 = no ramp)", 1000, int, 0, FREQ_MAX),
     ("ramp_interval", "Ramp step interval, ms", 100, int, 20, 10000),
     ("treat_time", "Treatment time (plasma on), s", 60.0, float, 0.1, 86400),
-    ("vent_valve", "Vent: solenoid valve opening, %", 20.0, float, 0, 100),
-    ("ambient_pressure", "Ambient pressure, kPa", 101.3, float, 0, 200),
-    ("ambient_tol", "Ambient tolerance, kPa", 2.0, float, 0, 50),
+    ("vent_valve", "Vent: proportional valve opening, %", 20.0, float, 0, 100),
+    ("ambient_pressure", "Ambient pressure, bar", 1.013, float, 0, 2.0),
+    ("ambient_tol", "Ambient tolerance, bar", 0.02, float, 0, 0.5),
     ("vent_wait", "Wait t2 after ambient reached, s", 5.0, float, 0, 3600),
     ("vent_timeout", "Venting timeout, s", 300.0, float, 1, 36000),
 ]
