@@ -25,6 +25,17 @@
 //
 // DATA line (sent every STREAM ms):
 // DATA MS=12345 SOL=0 PUMP=1 BRIDGE=0 VALVE=0.0 FREQ=20000 AFREQ=20000.0
+//      FLOWOK=1 FLOW=12.345 FTEMP=23.10
+//      HUMOK=1 HUM=45.12 HTEMP=22.85
+// FLOW (slm) and FTEMP (deg C) come from the Sensirion SFM4300-50-P on the
+// I2C bus; they are only sent when FLOWOK=1.
+// HUM (%RH) and HTEMP (deg C) come from the Sensylink CHT832X humidity
+// sensor; they are only sent when HUMOK=1 and update once per second.
+//
+// I2C bus (Uno R3 SDA/SCL header pins, same lines as A4/A5):
+//   GP8302 DAC        0x58
+//   SFM4300-50-P      0x2A
+//   CHT832X           0x44 (0x45/0x46/0x47 for B/C/D address variants)
 //
 // Chamber pressure is NOT read here: the Omega PXM409-USBH transmitter
 // plugs into the PC by USB and the GUI reads it directly.
@@ -39,6 +50,39 @@ const uint8_t CURRENT_REG = 0x02;
 const float MAX_VOLTAGE = 10.0;     // V
 const float MAX_CURRENT = 25.0;     // mA
 const float LOAD_RESISTOR = 460.0;  // Ohms
+
+// ==================================================
+// SFM4300-50-P FLOW SENSOR CONFIGURATION
+// ==================================================
+
+const uint8_t FLOW_ADDR = 0x2A;
+
+// Continuous-measurement command selects the gas calibration.
+//   0x3603 O2   0x3608 Air   0x3615 N2O   0x361E CO2
+const uint16_t FLOW_CMD_START = 0x3608;   // Air
+const uint16_t FLOW_CMD_STOP = 0x3FF9;
+const uint16_t FLOW_CMD_READ_SCALE = 0x3661;
+
+const float FLOW_TEMP_SCALE = 200.0;      // raw / 200 = deg C
+const unsigned long FLOW_RETRY_MS = 2000; // retry init if sensor missing
+
+// ==================================================
+// CHT832X HUMIDITY SENSOR CONFIGURATION
+// ==================================================
+
+// 7-bit address set by part number: A=0x44, B=0x45, C=0x46, D=0x47
+// (datasheet lists 8-bit write addresses 0x88/0x8A/0x8C/0x8E)
+const uint8_t HUM_ADDR = 0x44;
+
+const uint16_t HUM_CMD_ONESHOT = 0x2400;  // T + RH, no clock stretching
+const uint16_t HUM_CMD_BREAK = 0x3093;    // stop any periodic mode
+const uint16_t HUM_CMD_SOFT_RESET = 0x30A2;
+const uint16_t HUM_CMD_MANUFACTURER_ID = 0x3781;
+const uint16_t HUM_MANUFACTURER_ID = 0x5959;
+
+const unsigned long HUM_PERIOD_MS = 1000;   // datasheet: <= 1 measurement/s
+const unsigned long HUM_CONVERT_MS = 20;    // wait after one-shot trigger
+const unsigned long HUM_RETRY_MS = 2000;
 
 // ==================================================
 // PINS
@@ -68,6 +112,22 @@ unsigned long lastStreamMs = 0;
 unsigned long watchdogMs = 5000;
 unsigned long lastCommandMs = 0;
 bool watchdogTripped = false;
+
+bool flowReady = false;        // sensor initialised and measuring
+bool flowValid = false;        // last read succeeded
+int16_t flowScale = 1;         // read from sensor at init
+int16_t flowOffset = 0;
+float flowSlm = 0.0;
+float flowTempC = 0.0;
+unsigned long lastFlowInitMs = 0;
+
+bool humReady = false;         // sensor detected
+bool humValid = false;         // last read succeeded
+bool humPending = false;       // one-shot triggered, waiting for result
+float humRh = 0.0;
+float humTempC = 0.0;
+unsigned long humTriggerMs = 0;
+unsigned long lastHumMs = 0;
 
 // ==================================================
 // TIMER1 GATE PWM (D9, 50% duty)
@@ -186,6 +246,200 @@ void setValveOpening(float percentage)
 }
 
 // ==================================================
+// SFM4300-50-P FLOW SENSOR (I2C)
+// ==================================================
+
+// Sensirion CRC-8: polynomial 0x31, init 0xFF
+uint8_t sensirionCrc(uint8_t msb, uint8_t lsb)
+{
+  uint8_t crc = 0xFF;
+  uint8_t data[2] = {msb, lsb};
+  for (uint8_t i = 0; i < 2; i++)
+  {
+    crc ^= data[i];
+    for (uint8_t b = 0; b < 8; b++)
+      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+  }
+  return crc;
+}
+
+bool i2cWriteCommand(uint8_t addr, uint16_t cmd)
+{
+  Wire.beginTransmission(addr);
+  Wire.write((uint8_t)(cmd >> 8));
+  Wire.write((uint8_t)(cmd & 0xFF));
+  return Wire.endTransmission() == 0;
+}
+
+bool flowWriteCommandArg(uint16_t cmd, uint16_t arg)
+{
+  uint8_t msb = arg >> 8, lsb = arg & 0xFF;
+  Wire.beginTransmission(FLOW_ADDR);
+  Wire.write((uint8_t)(cmd >> 8));
+  Wire.write((uint8_t)(cmd & 0xFF));
+  Wire.write(msb);
+  Wire.write(lsb);
+  Wire.write(sensirionCrc(msb, lsb));
+  return Wire.endTransmission() == 0;
+}
+
+// Reads `count` CRC-protected 16-bit words (Sensirion-style framing,
+// shared by the SFM4300 and CHT832X)
+bool i2cReadWords(uint8_t addr, uint16_t *words, uint8_t count)
+{
+  uint8_t len = count * 3;
+  if (Wire.requestFrom(addr, len) != len) return false;
+
+  for (uint8_t i = 0; i < count; i++)
+  {
+    uint8_t msb = Wire.read();
+    uint8_t lsb = Wire.read();
+    uint8_t crc = Wire.read();
+    if (sensirionCrc(msb, lsb) != crc) return false;
+    words[i] = ((uint16_t)msb << 8) | lsb;
+  }
+  return true;
+}
+
+bool flowInit()
+{
+  flowReady = false;
+  flowValid = false;
+
+  // Stop any measurement left running (e.g. after an Arduino reset)
+  i2cWriteCommand(FLOW_ADDR, FLOW_CMD_STOP);
+  delay(1);
+
+  // Scale factor and offset for the selected gas: flow = (raw - offset) / scale
+  uint16_t w[3];
+  if (!flowWriteCommandArg(FLOW_CMD_READ_SCALE, FLOW_CMD_START)) return false;
+  delay(1);
+  if (!i2cReadWords(FLOW_ADDR, w, 3)) return false;
+
+  flowScale = (int16_t)w[0];
+  flowOffset = (int16_t)w[1];
+  if (flowScale == 0) return false;
+
+  if (!i2cWriteCommand(FLOW_ADDR, FLOW_CMD_START)) return false;
+  delay(15);  // first measurement ready ~12 ms after start
+
+  flowReady = true;
+  Serial.print("SFM4300 detected at 0x2A (scale ");
+  Serial.print(flowScale);
+  Serial.print(", offset ");
+  Serial.print(flowOffset);
+  Serial.println(").");
+  return true;
+}
+
+void readFlow()
+{
+  if (!flowReady)
+  {
+    if (millis() - lastFlowInitMs >= FLOW_RETRY_MS)
+    {
+      lastFlowInitMs = millis();
+      flowInit();
+    }
+    return;
+  }
+
+  // Flow, temperature, status word
+  uint16_t w[3];
+  if (!i2cReadWords(FLOW_ADDR, w, 3))
+  {
+    if (flowValid) Serial.println("ERROR: SFM4300 read failed.");
+    flowValid = false;
+    flowReady = false;            // re-initialise on next retry
+    lastFlowInitMs = millis();
+    return;
+  }
+
+  flowSlm = ((int16_t)w[0] - flowOffset) / (float)flowScale;
+  flowTempC = (int16_t)w[1] / FLOW_TEMP_SCALE;
+  flowValid = true;
+}
+
+// ==================================================
+// CHT832X HUMIDITY SENSOR (I2C)
+// ==================================================
+
+bool humInit()
+{
+  humReady = false;
+  humValid = false;
+  humPending = false;
+
+  i2cWriteCommand(HUM_ADDR, HUM_CMD_BREAK);
+  delay(1);
+  if (!i2cWriteCommand(HUM_ADDR, HUM_CMD_SOFT_RESET)) return false;
+  delay(5);  // soft reset time <= 1 ms, power-up <= 3 ms
+
+  uint16_t id;
+  if (!i2cWriteCommand(HUM_ADDR, HUM_CMD_MANUFACTURER_ID)) return false;
+  if (!i2cReadWords(HUM_ADDR, &id, 1)) return false;
+  if (id != HUM_MANUFACTURER_ID)
+  {
+    Serial.print("ERROR: Unexpected device at humidity address, ID 0x");
+    Serial.println(id, HEX);
+    return false;
+  }
+
+  humReady = true;
+  Serial.print("CHT832X detected at 0x");
+  Serial.print(HUM_ADDR, HEX);
+  Serial.println(".");
+  return true;
+}
+
+void humFail()
+{
+  if (humValid) Serial.println("ERROR: CHT832X read failed.");
+  humValid = false;
+  humReady = false;
+  humPending = false;
+  lastHumMs = millis();
+}
+
+// Non-blocking: trigger a one-shot, collect it HUM_CONVERT_MS later
+void serviceHumidity()
+{
+  unsigned long now = millis();
+
+  if (!humReady)
+  {
+    if (now - lastHumMs >= HUM_RETRY_MS)
+    {
+      lastHumMs = now;
+      humInit();
+    }
+    return;
+  }
+
+  if (humPending)
+  {
+    if (now - humTriggerMs < HUM_CONVERT_MS) return;
+    humPending = false;
+
+    uint16_t w[2];  // temperature, humidity
+    if (!i2cReadWords(HUM_ADDR, w, 2)) { humFail(); return; }
+
+    humTempC = -45.0 + 175.0 * (w[0] / 65535.0);
+    humRh = 100.0 * (w[1] / 65535.0);
+    humValid = true;
+    return;
+  }
+
+  if (now - lastHumMs >= HUM_PERIOD_MS)
+  {
+    lastHumMs = now;
+    if (!i2cWriteCommand(HUM_ADDR, HUM_CMD_ONESHOT)) { humFail(); return; }
+    humTriggerMs = now;
+    humPending = true;
+  }
+}
+
+// ==================================================
 // DIGITAL OUTPUTS
 // ==================================================
 
@@ -242,7 +496,26 @@ void sendData()
   Serial.print(" FREQ=");
   Serial.print(gateFrequency);
   Serial.print(" AFREQ=");
-  Serial.println(actualFrequency, 1);
+  Serial.print(actualFrequency, 1);
+  Serial.print(" FLOWOK=");
+  Serial.print(flowValid ? 1 : 0);
+  if (flowValid)
+  {
+    Serial.print(" FLOW=");
+    Serial.print(flowSlm, 3);
+    Serial.print(" FTEMP=");
+    Serial.print(flowTempC, 2);
+  }
+  Serial.print(" HUMOK=");
+  Serial.print(humValid ? 1 : 0);
+  if (humValid)
+  {
+    Serial.print(" HUM=");
+    Serial.print(humRh, 2);
+    Serial.print(" HTEMP=");
+    Serial.print(humTempC, 2);
+  }
+  Serial.println();
 }
 
 // ==================================================
@@ -280,7 +553,7 @@ void handleCommand(String input)
   if (input.length() == 0) return;
 
   if (input == "PING") return;
-  if (input == "STATUS") { sendData(); return; }
+  if (input == "STATUS") { readFlow(); sendData(); return; }
 
   if (input == "SOLENOID ON")  { setSolenoidValve(true);  return; }
   if (input == "SOLENOID OFF") { setSolenoidValve(false); return; }
@@ -365,6 +638,16 @@ void setup()
   }
   Serial.println("GP8302 detected at 0x58.");
 
+  // Flow sensor is optional: keep running without it and retry in loop()
+  lastFlowInitMs = millis();
+  if (!flowInit())
+    Serial.println("ERROR: SFM4300 not detected at 0x2A, will retry.");
+
+  // Humidity sensor is optional too
+  lastHumMs = millis();
+  if (!humInit())
+    Serial.println("ERROR: CHT832X not detected, will retry.");
+
   setValveOpening(0.0);
   setSolenoidValve(false);
 
@@ -398,9 +681,12 @@ void loop()
     }
   }
 
+  serviceHumidity();
+
   if (streamPeriodMs > 0 && millis() - lastStreamMs >= streamPeriodMs)
   {
     lastStreamMs = millis();
+    readFlow();
     sendData();
   }
 }

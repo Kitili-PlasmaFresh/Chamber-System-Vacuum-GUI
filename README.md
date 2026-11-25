@@ -115,13 +115,32 @@ The Arduino provides the hardware interface. It applies commands from the GUI an
 | Half-Bridge Amplifier | Arduino D8 | Enables/disables half-bridge power |
 | Gate Drive | Arduino D9 | Generates adjustable-frequency output at 50% duty cycle |
 | Proportional Valve | GP8302 DAC | Sets valve opening percentage |
+| Flow Meter | Sensirion SFM4300-50-P, I2C `0x2A` (SDA/SCL) | Reports gas flow (slm) and gas temperature |
+| Humidity Sensor | Sensylink CHT832X, I2C `0x44` (SDA/SCL) | Reports relative humidity (%RH) and temperature |
 | Pressure Transmitter | PC USB serial | Supplies chamber pressure directly to the GUI |
 
-### 5.2 Gate Drive Control
+### 5.2 I2C Bus
+
+The GP8302 DAC (`0x58`), the Sensirion SFM4300-50-P flow meter (`0x2A`) and the Sensylink CHT832X humidity sensor (`0x44`) share the Arduino Uno R3 I2C bus at 100 kHz. Each sensor connects to the same four lines:
+
+| Sensor pin | Arduino Uno R3 |
+|---|---|
+| SDA | SDA (header pin beside AREF; same line as A4) |
+| SCL | SCL (header pin beside AREF; same line as A5) |
+| VDD / Vcc | SFM4300: supply per its datasheet · CHT832X: 5 V or 3.3 V (1.8–5.5 V rated) |
+| GND | GND |
+
+**Check before wiring:** confirm the SFM4300's supply voltage and I/O logic level in its datasheet. The Uno drives I2C at 5 V; if the sensor is a 3.3 V device, use a bidirectional I2C level shifter and pull-ups to the sensor's supply rather than connecting directly.
+
+The firmware selects the **Air** calibration (`FLOW_CMD_START = 0x3608`); change this constant for O2, N2O or CO2. Scale factor and offset are read from the sensor at start-up, so no per-variant constants are hard-coded. The flow meter is optional: if it is absent the controller still runs, reports `FLOWOK=0`, and retries detection every 2 s. When present, each DATA line includes `FLOWOK=1 FLOW=<slm> FTEMP=<°C>`.
+
+**CHT832X humidity sensor.** The CHT832X runs from 1.8 to 5.5 V, so it can be powered from the Uno's 5 V pin and connected directly to SDA/SCL. Fit a 0.1 µF capacitor close to Vcc/GND. The bus needs 4.7 kΩ pull-ups on SDA and SCL; add them if no other board on the bus already provides them. The 7-bit address depends on the part's ordering code: A = `0x44`, B = `0x45`, C = `0x46`, D = `0x47` (the datasheet lists these as 8-bit write addresses `0x88`–`0x8E`). Set `HUM_ADDR` in the firmware to match. At start-up the firmware checks the sensor's manufacturer ID (`0x5959`). It then triggers one non-blocking measurement per second, the maximum rate the datasheet recommends to avoid self-heating. Like the flow meter, the sensor is optional: if absent, the DATA line reports `HUMOK=0` and detection is retried every 2 s. When present, each DATA line includes `HUMOK=1 HUM=<%RH> HTEMP=<°C>`.
+
+### 5.3 Gate Drive Control
 
 The gate drive and half-bridge power are controlled independently. The gate drive supports **0–40 kHz**, a **50% duty cycle**, frequency ramping, direct frequency selection, and reported-frequency monitoring. A frequency request of **0 Hz** disables the signal and holds D9 LOW.
 
-### 5.3 Proportional Valve Control
+### 5.4 Proportional Valve Control
 
 The GP8302 DAC controls a valve opening request from **0–100%**. During normal automatic venting, the recipe setting is restricted to **0–30%** unless the override is enabled. The valve is commanded to 0% at the start of evacuation and after plasma disengagement.
 
